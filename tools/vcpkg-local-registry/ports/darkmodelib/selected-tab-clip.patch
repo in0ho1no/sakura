@@ -29,7 +29,34 @@ diff --git a/src/DmlibSubclassControl.cpp b/src/DmlibSubclassControl.cpp
  
  	POINT ptCursor{};
  	::GetCursorPos(&ptCursor);
-@@ -1507,6 +1507,7 @@
+@@ -1487,9 +1487,25 @@
+ 	::SetBkMode(hdc, TRANSPARENT);
+ 
+ 	const bool isOwnerDraw = (nStyle & TCS_OWNERDRAWFIXED) != 0;
++	const bool drawSelectedLast = isOwnerDraw
++		&& ((nStyle & TCS_BUTTONS) == 0)
++		&& iSelTab >= 0 && iSelTab < nTabs;
+ 
+-	for (int i = 0; i < nTabs; ++i)
++	for (int drawIndex = 0; drawIndex < nTabs; ++drawIndex)
+ 	{
++		int i = drawIndex;
++		if (drawSelectedLast)
++		{
++			if (drawIndex == nTabs - 1)
++			{
++				i = iSelTab;
++			}
++			else if (drawIndex >= iSelTab)
++			{
++				++i;
++			}
++		}
++
+ 		RECT rcItem{};
+ 		TabCtrl_GetItemRect(hWnd, i, &rcItem);
+ 
+@@ -1507,6 +1523,7 @@
  				, 0
  			};
  
