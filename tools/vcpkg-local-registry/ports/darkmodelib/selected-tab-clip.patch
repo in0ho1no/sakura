@@ -1,0 +1,39 @@
+diff --git a/src/DmlibSubclassControl.cpp b/src/DmlibSubclassControl.cpp
+--- a/src/DmlibSubclassControl.cpp
++++ b/src/DmlibSubclassControl.cpp
+@@ -1460,6 +1460,13 @@
+ 		iTab = nTabs - 1;
+ 	}
+ 
++	auto holdClip = ::CreateRectRgn(0, 0, 0, 0);
++	if (::GetClipRgn(hdc, holdClip) != 1)
++	{
++		::DeleteObject(holdClip);
++		holdClip = nullptr;
++	}
++
+ 	RECT rcSelTab{};
+ 	TabCtrl_GetItemRect(hWnd, iTab, &rcSelTab);
+ 
+@@ -1472,13 +1479,6 @@
+ 
+ 	const auto hPen = dmlib_paint::GdiObject{ hdc, dmlib::getEdgePen(), true };
+ 	const auto hFont = dmlib_paint::GdiObject{ hdc, hWnd };
+-
+-	auto holdClip = ::CreateRectRgn(0, 0, 0, 0);
+-	if (::GetClipRgn(hdc, holdClip) != 1)
+-	{
+-		::DeleteObject(holdClip);
+-		holdClip = nullptr;
+-	}
+ 
+ 	POINT ptCursor{};
+ 	::GetCursorPos(&ptCursor);
+@@ -1507,6 +1507,7 @@
+ 				, 0
+ 			};
+ 
++			::SelectClipRgn(hdc, holdClip);
+ 			::SetTextColor(hdc, (iSelTab == i) ? dmlib::getTextColor() : dmlib::getDarkerTextColor());
+ 			::SendMessage(::GetParent(hWnd), WM_DRAWITEM, 0, reinterpret_cast<LPARAM>(&dis));
+ 			continue;
