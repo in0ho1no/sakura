@@ -5,6 +5,7 @@ if(NOT EXISTS "${DARKMODELIB_SOURCE_ROOT}/include/Darkmodelib.h")
   message(FATAL_ERROR "darkmodelib source not found: ${DARKMODELIB_SOURCE_ROOT}")
 endif()
 
+# Do not patch the submodule checkout; apply the fix to a build-tree copy.
 set(DARKMODELIB_ARCHIVE "${CURRENT_BUILDTREES_DIR}/darkmodelib-source.tar")
 vcpkg_execute_required_process(
   COMMAND "${CMAKE_COMMAND}" -E tar cf "${DARKMODELIB_ARCHIVE}" --format=gnutar

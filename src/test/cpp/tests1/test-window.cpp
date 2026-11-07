@@ -6,6 +6,7 @@
 */
 #include "pch.h"
 #include "util/window.h"
+#include "apiwrap/DarkMode.h"
 
 #include "dlg/ModalDialogCloser.hpp"
 #include "env/ShareDataTestSuite.hpp"
@@ -1360,6 +1361,220 @@ TEST_F(TrayWndTest, ShowContextMenu001)
 	pcTrayWnd->DispatchEvent(hWndTray, MYWM_NOTIFYICON, 0L, WM_RBUTTONDOWN);
 	pcTrayWnd->DispatchEvent(hWndTray, MYWM_NOTIFYICON, 0L, WM_RBUTTONUP);
 }
+
+/*!
+ * 共通設定から後作成したタブの描画を確認するフィクスチャ
+ */
+struct TabBarInitializationTest : public ::testing::Test, public EditorTestSuite, public UiaTestSuite {
+	using WindowDcHolder = cxx::ResourceHolder<&::ReleaseDC>;
+
+	// 各テストの終了時に復元するライブラリのモードと配色
+	DarkMode::DarkModeType savedMode = !DarkMode::isEnabled()
+		? DarkMode::DarkModeType::classic
+		: IsDarkModeActive() ? DarkMode::DarkModeType::dark : DarkMode::DarkModeType::light;
+	DarkMode::Colors savedColors{
+		DarkMode::getBackgroundColor(), DarkMode::getCtrlBackgroundColor(),
+		DarkMode::getHotBackgroundColor(), DarkMode::getDlgBackgroundColor(),
+		DarkMode::getErrorBackgroundColor(), DarkMode::getTextColor(),
+		DarkMode::getDarkerTextColor(), DarkMode::getDisabledTextColor(),
+		DarkMode::getLinkTextColor(), DarkMode::getEdgeColor(),
+		DarkMode::getHotEdgeColor(), DarkMode::getDisabledEdgeColor(),
+		DarkMode::getHighlightColor()
+	};
+	DarkMode::ColorsView savedViewColors{
+		DarkMode::getViewBackgroundColor(), DarkMode::getViewTextColor(),
+		DarkMode::getViewGridlinesColor(), DarkMode::getHeaderBackgroundColor(),
+		DarkMode::getHeaderHotBackgroundColor(), DarkMode::getHeaderTextColor(),
+		DarkMode::getHeaderEdgeColor()
+	};
+	std::unique_ptr<CommonSetting> savedCommon;
+	bool editorPrepared = false;
+
+	/*!
+	 * テストが実行される直前に毎回呼ばれる関数
+	 */
+	void SetUp() override
+	{
+		// OLEと編集オブジェクトを初期化し、変更する共通設定を保存する
+		DarkMode::initDarkMode();
+		ASSERT_NO_FATAL_FAILURE(SetUpUiaTestSuite());
+		editorPrepared = true;
+		ASSERT_NO_FATAL_FAILURE(SetUpEditor());
+		savedCommon = std::make_unique<CommonSetting>(GetDllShareData().m_Common);
+
+		// タブを非表示にし、後作成するタブを閉じるボタンなしの単一行にする
+		auto& common = GetDllShareData().m_Common;
+		common.m_sWindow.m_bDarkMode = FALSE;
+		common.m_sTabBar.m_bDispTabWnd = FALSE;
+		common.m_sTabBar.m_bDispTabWndMultiWin = TRUE;
+		common.m_sTabBar.m_bDispTabClose = DISPTABCLOSE_NO;
+		common.m_sTabBar.m_bDispTabIcon = FALSE;
+		common.m_sTabBar.m_bTabMultiLine = FALSE;
+		common.m_sTabBar.m_eTabPosition = TabPosition_Top;
+		ApplyDarkModeSetting(FALSE);
+
+		// 実際の編集ウィンドウを作り、タブがまだ存在しないことを確認する
+		ASSERT_THAT(pcEditWnd->CreateMainWnd(SW_SHOWNOACTIVATE), NotNull());
+		ASSERT_THAT(FindTabControl(), IsNull());
+	}
+
+	/*!
+	 * テストが実行された直後に毎回呼ばれる関数
+	 */
+	void TearDown() override
+	{
+		// 次のテストで再作成できるよう、作成したウィンドウとクラス登録を解放する
+		if (pcEditWnd && ::IsWindow(pcEditWnd->GetHwnd())) {
+			::DestroyWindow(pcEditWnd->GetHwnd());
+			EXPECT_TRUE(::UnregisterClassW(GSTR_EDITWINDOWNAME, G_AppInstance()));
+			EXPECT_TRUE(::UnregisterClassW(L"SplitterWndClass", G_AppInstance()));
+		}
+		// 共通設定を復元してから編集オブジェクトとOLEを解放する
+		if (savedCommon) {
+			GetDllShareData().m_Common = *savedCommon;
+		}
+		if (editorPrepared) {
+			TearDownEditor();
+		}
+		TearDownUiaTestSuite();
+
+		// ライブラリの配色を他のテストへ持ち越さない
+		DarkMode::setDarkModeConfigEx(static_cast<UINT>(savedMode));
+		DarkMode::setDefaultColors(true);
+		DarkMode::setThemeColors(&savedColors);
+		DarkMode::setViewColors(&savedViewColors);
+		DarkMode::updateThemeBrushesAndPens();
+		DarkMode::updateViewBrushesAndPens();
+
+		// 破棄したウィンドウの通知と終了メッセージを残さない
+		MSG message{};
+		while (::PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {}
+	}
+
+	/*!
+	 * テストが所有する編集ウィンドウのタブコントロールを取得する
+	 */
+	HWND FindTabControl() const
+	{
+		const auto bar = ::FindWindowExW(pcEditWnd->GetHwnd(), nullptr, L"CTabWnd", nullptr);
+		return bar ? ::FindWindowExW(bar, nullptr, WC_TABCONTROLW, nullptr) : nullptr;
+	}
+
+	/*!
+	 * 共通設定の変更通知からタブバーの表示と配色を変更する
+	 */
+	void ApplySettings(bool showTab, bool darkMode = false) const
+	{
+		auto& common = GetDllShareData().m_Common;
+		common.m_sTabBar.m_bDispTabWnd = showTab;
+		common.m_sWindow.m_bDarkMode = darkMode;
+		pcEditWnd->DispatchEvent(pcEditWnd->GetHwnd(), MYWM_CHANGESETTING, 0, PM_CHANGESETTING_ALL);
+	}
+
+	/*!
+	 * 選択タブの背景がdarkmodelibの公開配色に追従することを確認する
+	 */
+	void ExpectLibraryPainting() const
+	{
+		// 描画の前提として、閉じるボタンなしの選択タブが表示されていることを確認する
+		const auto tab = FindTabControl();
+		ASSERT_THAT(tab, NotNull());
+		ASSERT_TRUE(::IsWindowVisible(tab));
+		ASSERT_EQ(::GetWindowLongPtrW(tab, GWL_STYLE) & TCS_OWNERDRAWFIXED, 0);
+		const auto selected = TabCtrl_GetCurSel(tab);
+		ASSERT_GE(selected, 0);
+		RECT item{};
+		ASSERT_TRUE(TabCtrl_GetItemRect(tab, selected, &item));
+		ASSERT_GT(item.right - item.left, 8);
+		ASSERT_GT(item.bottom - item.top, 4);
+
+		// 途中でアサートに失敗した場合も識別用の背景色を復元する
+		struct RestoreColor {
+			COLORREF color = DarkMode::getDlgBackgroundColor();
+			~RestoreColor()
+			{
+				DarkMode::setDlgBackgroundColor(color);
+				DarkMode::updateThemeBrushesAndPens();
+			}
+		} restore;
+
+		// 既定の背景色との偶然の一致を除くため、2色への追従を確認する
+		for (const auto marker : { RGB(13, 97, 223), RGB(211, 53, 149) }) {
+			DarkMode::setDlgBackgroundColor(marker);
+			DarkMode::updateThemeBrushesAndPens();
+			ASSERT_TRUE(::RedrawWindow(tab, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW));
+			WindowDcHolder dc(tab);
+			dc = ::GetDC(tab);
+			ASSERT_THAT(dc.get(), NotNull());
+			// 文字や枠を除いた、選択タブ下部の背景を確認する
+			bool found = false;
+			for (int x = item.left + 2; x < item.right - 2; ++x) {
+				found = found || (::GetPixel(dc.get(), x, item.bottom - 3) == marker);
+			}
+			EXPECT_TRUE(found) << "Selected tab did not render library background color " << marker;
+		}
+	}
+};
+
+/*!
+ * ライトで共通設定から後作成したタブも、ライブラリの配色で描画される
+ */
+TEST_F(TabBarInitializationTest, LightTabCreatedByCommonSettingsUsesLibraryPainting)
+{
+	ApplySettings(true);
+	ASSERT_NO_FATAL_FAILURE(ExpectLibraryPainting());
+}
+
+/*!
+ * ダークで共通設定から後作成したタブも、ライブラリの配色で描画される
+ */
+TEST_F(TabBarInitializationTest, DarkTabCreatedByCommonSettingsUsesLibraryPainting)
+{
+	ApplySettings(true, true);
+	ASSERT_NO_FATAL_FAILURE(ExpectLibraryPainting());
+}
+
+/*!
+ * 共通設定を再通知しても、既存のタブとライブラリによる描画を維持する
+ */
+TEST_F(TabBarInitializationTest, RepeatedSettingsKeepExistingTabAndLibraryPainting)
+{
+	ApplySettings(true);
+	ASSERT_NO_FATAL_FAILURE(ExpectLibraryPainting());
+	const auto tab = FindTabControl();
+	ApplySettings(true);
+	EXPECT_THAT(FindTabControl(), Eq(tab));
+	ASSERT_NO_FATAL_FAILURE(ExpectLibraryPainting());
+}
+
+/*!
+ * ライトでタブを非表示にしてから再作成しても、ライブラリの配色で描画される
+ */
+TEST_F(TabBarInitializationTest, RecreatedLightTabUsesLibraryPainting)
+{
+	ApplySettings(true);
+	ASSERT_NO_FATAL_FAILURE(ExpectLibraryPainting());
+	const auto tab = FindTabControl();
+	ApplySettings(false);
+	ASSERT_THAT(FindTabControl(), IsNull());
+	EXPECT_FALSE(::IsWindow(tab));
+	ApplySettings(true);
+	ASSERT_NO_FATAL_FAILURE(ExpectLibraryPainting());
+}
+
+/*!
+ * ライトで後作成したタブをダークへ切り替えても、ライブラリによる描画を維持する
+ */
+TEST_F(TabBarInitializationTest, LightTabKeepsLibraryPaintingAfterDarkModeSwitch)
+{
+	ApplySettings(true);
+	ASSERT_NO_FATAL_FAILURE(ExpectLibraryPainting());
+	const auto tab = FindTabControl();
+	ApplySettings(true, true);
+	EXPECT_THAT(FindTabControl(), Eq(tab));
+	ASSERT_NO_FATAL_FAILURE(ExpectLibraryPainting());
+}
+
 
 struct EditWndTest : public ::testing::Test, public window::EditorTestSuite, public window::UiaTestSuite {
 	static inline std::filesystem::path backupAgentTargetPath{};
