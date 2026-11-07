@@ -1368,6 +1368,64 @@ TEST_F(TrayWndTest, ShowContextMenu001)
 struct TabBarInitializationTest : public ::testing::Test, public EditorTestSuite, public UiaTestSuite {
 	using WindowDcHolder = cxx::ResourceHolder<&::ReleaseDC>;
 
+	/*!
+	 * 親の描画処理に入る時点のタブ描画順と、選択タブの描画領域を記録する
+	 */
+	struct TabDrawItemProbe {
+		HWND tab;
+		HWND parent;
+		UINT selected;
+		std::vector<UINT> drawnItems;
+		bool selectedVisible = false;
+		bool attached = false;
+
+		TabDrawItemProbe(HWND hwndTab, UINT selectedIndex)
+			: tab(hwndTab), parent(::GetParent(hwndTab)), selected(selectedIndex)
+		{
+			drawnItems.reserve(TabCtrl_GetItemCount(tab));
+		}
+
+		TabDrawItemProbe(const TabDrawItemProbe&) = delete;
+		TabDrawItemProbe& operator=(const TabDrawItemProbe&) = delete;
+
+		~TabDrawItemProbe()
+		{
+			// 途中でアサートに失敗した場合も、親に観測処理を残さない
+			if (attached) {
+				::RemoveWindowSubclass(parent, SubclassProc, reinterpret_cast<UINT_PTR>(this));
+			}
+		}
+
+		/*!
+		 * このタブの親に描画通知の観測処理を登録する
+		 */
+		bool Attach()
+		{
+			attached = ::SetWindowSubclass(parent, SubclassProc,
+				reinterpret_cast<UINT_PTR>(this), reinterpret_cast<DWORD_PTR>(this)) != FALSE;
+			return attached;
+		}
+
+		/*!
+		 * 対象タブの描画通知だけを記録し、元の親描画処理へ引き渡す
+		 */
+		static LRESULT CALLBACK SubclassProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam,
+			UINT_PTR, DWORD_PTR reference)
+		{
+			auto& probe = *reinterpret_cast<TabDrawItemProbe*>(reference);
+			if (message == WM_DRAWITEM) {
+				const auto& item = *reinterpret_cast<const DRAWITEMSTRUCT*>(lparam);
+				if (item.CtlType == ODT_TAB && item.hwndItem == probe.tab) {
+					probe.drawnItems.push_back(item.itemID);
+					if (item.itemID == probe.selected) {
+						probe.selectedVisible = ::RectVisible(item.hDC, &item.rcItem) != FALSE;
+					}
+				}
+			}
+			return ::DefSubclassProc(hwnd, message, wparam, lparam);
+		}
+	};
+
 	// 各テストの終了時に復元するライブラリのモードと配色
 	DarkMode::DarkModeType savedMode = !DarkMode::isEnabled()
 		? DarkMode::DarkModeType::classic
@@ -1514,6 +1572,43 @@ struct TabBarInitializationTest : public ::testing::Test, public EditorTestSuite
 			EXPECT_TRUE(found) << "Selected tab did not render library background color " << marker;
 		}
 	}
+
+	/*!
+	 * 閉じるボタンありの描画で、選択タブに描けることと最後に描かれることを確認する
+	 */
+	void ExpectOwnerDrawPainting(bool darkMode) const
+	{
+		GetDllShareData().m_Common.m_sTabBar.m_bDispTabClose = DISPTABCLOSE_ALLWAYS;
+		ApplySettings(true, darkMode);
+		const auto tab = FindTabControl();
+		ASSERT_THAT(tab, NotNull());
+		ASSERT_TRUE(::IsWindowVisible(tab));
+		ASSERT_NE(::GetWindowLongPtrW(tab, GWL_STYLE) & TCS_OWNERDRAWFIXED, 0);
+		ASSERT_EQ(TabCtrl_GetItemCount(tab), 1);
+
+		// 選択タブの前後との描画順を確認するため、所有するコントロールに検証用の項目を追加する
+		wchar_t label[] = L"tab";
+		TCITEMW item{};
+		item.mask = TCIF_TEXT;
+		item.pszText = label;
+		for (int index = 1; index < 3; ++index) {
+			ASSERT_EQ(TabCtrl_InsertItem(tab, index, &item), index);
+		}
+
+		// 先頭・中間・末尾を選び、全項目が1回ずつ描かれて選択項目が最後になることを確認する
+		for (int selected = 0; selected < 3; ++selected) {
+			SCOPED_TRACE(selected);
+			TabCtrl_SetCurSel(tab, selected);
+			ASSERT_EQ(TabCtrl_GetCurSel(tab), selected);
+			TabDrawItemProbe probe(tab, static_cast<UINT>(selected));
+			ASSERT_TRUE(probe.Attach());
+			ASSERT_TRUE(::RedrawWindow(tab, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW));
+			EXPECT_THAT(probe.drawnItems, ::testing::UnorderedElementsAre(0u, 1u, 2u));
+			ASSERT_FALSE(probe.drawnItems.empty());
+			EXPECT_EQ(probe.drawnItems.back(), static_cast<UINT>(selected));
+			EXPECT_TRUE(probe.selectedVisible);
+		}
+	}
 };
 
 /*!
@@ -1573,6 +1668,22 @@ TEST_F(TabBarInitializationTest, LightTabKeepsLibraryPaintingAfterDarkModeSwitch
 	ApplySettings(true, true);
 	EXPECT_THAT(FindTabControl(), Eq(tab));
 	ASSERT_NO_FATAL_FAILURE(ExpectLibraryPainting());
+}
+
+/*!
+ * ライトの閉じるボタンありの描画で、選択タブの領域と描画順を維持する
+ */
+TEST_F(TabBarInitializationTest, LightOwnerDrawTabsKeepSelectionVisibleAndLast)
+{
+	ASSERT_NO_FATAL_FAILURE(ExpectOwnerDrawPainting(false));
+}
+
+/*!
+ * ダークの閉じるボタンありの描画で、選択タブの領域と描画順を維持する
+ */
+TEST_F(TabBarInitializationTest, DarkOwnerDrawTabsKeepSelectionVisibleAndLast)
+{
+	ASSERT_NO_FATAL_FAILURE(ExpectOwnerDrawPainting(true));
 }
 
 
